@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AJI AUDIO LUMAJANG - DLMS HOREG PRO v5.6.4 (Secured)</title>
+    <title>AJI AUDIO LUMAJANG - DLMS HOREG PRO v6.0.0 UPDATE (Secured)</title>
     <style>
         :root {
             --bg-main: #070a0e;
@@ -198,7 +198,7 @@
 <div class="container" id="main-app" style="filter: blur(5px); pointer-events: none; transition: filter 0.5s ease;">
     <header>
         <h1>AJI AUDIO LUMAJANG</h1>
-        <p>Digital Loudspeaker Management System Matrix • Core Engine Horeg v5.6.4</p>
+        <p>Digital Loudspeaker Management System Matrix • Core Engine Horeg v6.0.0 UPDATE</p>
     </header>
 
     <div class="master-grid">
@@ -214,11 +214,7 @@
 
             <label style="font-weight: bold; color: #fff;">AUDIO TRACK INPUT MANAGEMENT</label>
             <div class="player-controls">
-                <select id="audio-source-selector" style="width: 100%; background: #070a0e; border: 1px solid var(--border-color); color: var(--accent-blue); padding: 8px; font-weight: bold; border-radius: 4px;">
-                    <option value="file">🎵 MP3 / Audio File Lokal</option>
-                    <option value="live">🎙️ Live Input (Internal System Audio)</option>
-                </select>
-                <div id="file-input-container" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
                     <input type="file" id="audio-file" accept="audio/*" style="width: 100%;">
                 </div>
                 <audio id="audio-player" controls loop></audio>
@@ -487,7 +483,7 @@
         r: { ch: false, hpfByp: false, hpfMute: false, lpfByp: false, lpfMute: false, eq: false, phase: false, echo: false, limMute: false }
     };
 
-    let audioCtx = null, mediaElementSource = null, liveStreamSource = null, currentStream = null, masterGainNode = null, nodeL = null, nodeR = null;
+    let audioCtx = null, audioSource = null, masterGainNode = null, nodeL = null, nodeR = null;
     let internalGenNode = null; 
     let globalRenderReqId = null;
 
@@ -504,20 +500,21 @@
     const ID_PERANGKAT_SEKARANG = ambilAtauBuatDeviceId();
 
     async function dapatkanWaktuOnlineAkurat() {
-        try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 6000);
-            const respon = await fetch('https://worldtimeapi.org/api/timezone/Asia/Jakarta', { signal: controller.signal });
-            clearTimeout(timeoutId);
-            if (respon.ok) {
-                const data = await respon.json();
-                return new Date(data.datetime);
-            }
-        } catch (e) { 
-            console.warn("Gagal mengambil waktu online, fallback ke waktu PC lokal."); 
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        const respon = await fetch('https://worldtimeapi.org/api/timezone/Asia/Jakarta', { signal: controller.signal });
+        clearTimeout(timeoutId);
+        if (respon.ok) {
+            const data = await respon.json();
+            return new Date(data.datetime);
         }
+    } catch (e) { 
+        console.warn("API Waktu gagal. Menolak memvalidasi berbasis waktu lokal demi keamanan.");
         return new Date();
+        throw new Error("Koneksi ke server waktu terputus."); 
     }
+}
 
     function parseRelativeTime(str, baseDate) {
         if (!str) return null;
@@ -703,8 +700,11 @@
         perbaruiDaftarPresetLokal(); 
         
         // Memastikan resize canvas bekerja mulus
-        window.addEventListener('resize', handleCanvasResize);
-        setTimeout(handleCanvasResize, 100); 
+        let resizeTimer;
+window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(handleCanvasResize, 150); // Menunggu 150ms setelah resize berhenti
+});
     }
 
     function mulaiHitungMundur(expiredDateStr) {
@@ -892,8 +892,16 @@
                 });
             }
 
-            this.limiter = this.ctx.createDynamicsCompressor(); this.limiter.knee.value = 0; 
+                        this.limiter = this.ctx.createDynamicsCompressor(); this.limiter.knee.value = 0; 
             this.analyser = this.ctx.createAnalyser(); this.analyser.fftSize = 64;
+            
+            // --- TAMBAHAN: RTA High-Res Khusus Background PEQ ---
+            this.spectrumAnalyser = this.ctx.createAnalyser();
+            this.spectrumAnalyser.fftSize = 8192; // Resolusi tinggi agar bass akurat
+            this.spectrumAnalyser.smoothingTimeConstant = 0.85;
+            // Ambil sinyal dari phaseNode (sebelum masuk Crossover/EQ) agar menampilkan sumber audio asli
+            this.phaseNode.connect(this.spectrumAnalyser); 
+            // ----------------------------------------------------
 
             lastNode.connect(this.analyser); this.analyser.connect(this.limiter);
         }
@@ -1005,10 +1013,22 @@
         }
 
         setMute(isMuted) {
-            if (!this.ctx) return;
-            if (isMuted) this.gainNode.gain.setTargetAtTime(0, this.ctx.currentTime, 0.02);
-            else this.gainNode.gain.setTargetAtTime(this.currentGainVal, this.ctx.currentTime, 0.02);
-        }
+    if (!this.ctx) return;
+    let t = this.ctx.currentTime;
+    
+    // 1. Bersihkan sisa instruksi automasi sebelumnya yang menyangkut
+    this.gainNode.gain.cancelScheduledValues(t);
+    
+    // 2. Beri "anchor" nilai saat ini agar Audio Engine langsung merespons
+    this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, t);
+    
+    // 3. Gunakan linearRampToValueAtTime (lebih stabil dan pasti sampai target ketimbang setTargetAtTime)
+    if (isMuted) {
+        this.gainNode.gain.linearRampToValueAtTime(0, t + 0.03);
+    } else {
+        this.gainNode.gain.linearRampToValueAtTime(this.currentGainVal, t + 0.03);
+    }
+}
 
         togglePhase(isInverted) {
             if (!this.ctx) return; this.phaseNode.gain.setValueAtTime(isInverted ? -1.0 : 1.0, this.ctx.currentTime);
@@ -1046,23 +1066,59 @@
         const fMin = 20;
         const fMax = 1000;
 
-        ctxRender.strokeStyle = '#1c232a'; ctxRender.lineWidth = 1;
-        const gridFreqs = [20, 30, 40, 50, 70, 100, 150, 200, 300, 400, 500, 700, 1000];
-        gridFreqs.forEach(fLine => {
-            let x = Math.log10(fLine / fMin) / Math.log10(fMax / fMin) * W;
-            ctxRender.beginPath(); ctxRender.moveTo(x, 0); ctxRender.lineTo(x, H); ctxRender.stroke();
-        });
-        ctxRender.beginPath(); ctxRender.moveTo(0, H/2); ctxRender.lineTo(W, H/2); ctxRender.stroke();
-
-        ctxRender.fillStyle = '#6e7681'; ctxRender.font = '10px Consolas';
+                ctxRender.fillStyle = '#6e7681'; ctxRender.font = '10px Consolas';
         [20, 50, 100, 200, 500, 1000].forEach(lbl => {
             let x = Math.log10(lbl / fMin) / Math.log10(fMax / fMin) * W;
             ctxRender.fillText(lbl + 'Hz', x + 2, H - 4);
         });
 
+        // --- TAMBAHAN: DRAW REAL-TIME SPECTRUM AUDIO ---
+        if (audioCtx && audioCtx.state === 'running' && nodeL && nodeL.spectrumAnalyser) {
+            const bufferLength = nodeL.spectrumAnalyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            nodeL.spectrumAnalyser.getByteFrequencyData(dataArray);
+
+            const nyquist = audioCtx.sampleRate / 2;
+            const freqPerBin = nyquist / bufferLength;
+
+            ctxRender.beginPath();
+            ctxRender.fillStyle = 'rgba(0, 236, 255, 0.15)'; // Cyan transparan agar tidak menabrak garis EQ
+            ctxRender.strokeStyle = 'rgba(0, 236, 255, 0.4)';
+            ctxRender.lineWidth = 1;
+            
+            let started = false;
+            let lastX = 0;
+            
+            for (let i = 0; i < bufferLength; i++) {
+                let freq = i * freqPerBin;
+                // Hanya proses frekuensi di rentang fMin (20Hz) hingga fMax (1000Hz)
+                if (freq >= fMin && freq <= fMax) {
+                    let x = (Math.log10(freq / fMin) / Math.log10(fMax / fMin)) * W;
+                    // Konversi nilai 0-255 ke tinggi canvas
+                    let y = H - (dataArray[i] / 255) * H; 
+                    
+                    if (!started) {
+                        ctxRender.moveTo(x, H); // Mulai dari dasar
+                        started = true;
+                    }
+                    ctxRender.lineTo(x, y);
+                    lastX = x;
+                } else if (freq > fMax) {
+                    break;
+                }
+            }
+            if (started) {
+                ctxRender.lineTo(lastX, H); // Tutup area ke dasar agar rapi
+                ctxRender.closePath();
+                ctxRender.fill();
+                ctxRender.stroke();
+            }
+        }
+        // --- END SPECTRUM AUDIO ---
+
         const Fs = audioCtx ? audioCtx.sampleRate : 44100; 
         let activeBands = [];
-        
+
         if (!muteState.l.eq) {
             for (let i = 0; i < 3; i++) {
                 if (!isProUser && i > 1) continue; 
@@ -1116,73 +1172,6 @@
         ctxRender.stroke();
     }
 
-    async function routeAudioSource(type) {
-        if (!audioCtx) return;
-        
-        try { if (mediaElementSource) mediaElementSource.disconnect(); } catch(e) {}
-        try { if (liveStreamSource) liveStreamSource.disconnect(); } catch(e) {}
-
-        if (type === 'file') {
-            document.getElementById('file-input-container').style.display = 'flex';
-            document.getElementById('audio-player').style.display = 'block';
-            
-            if (currentStream) {
-                currentStream.getTracks().forEach(track => track.stop());
-                currentStream = null;
-            }
-            
-            if (mediaElementSource) {
-                mediaElementSource.connect(masterGainNode);
-                if (audioPlayer.paused && audioPlayer.src) {
-                    audioPlayer.play().catch(e => console.warn(e));
-                }
-            }
-        } else if (type === 'live') {
-            document.getElementById('file-input-container').style.display = 'none';
-            document.getElementById('audio-player').style.display = 'none';
-            
-            if (audioPlayer && !audioPlayer.paused) {
-                audioPlayer.pause();
-            }
-
-            try {
-                // Menggunakan getDisplayMedia untuk menangkap Internal System Audio (Layar/Tab)
-                currentStream = await navigator.mediaDevices.getDisplayMedia({ 
-                    video: true, // Wajib disertakan di banyak browser untuk memunculkan prompt getDisplayMedia
-                    audio: { 
-                        echoCancellation: false, 
-                        noiseSuppression: false, 
-                        autoGainControl: false,
-                        sampleRate: 44100
-                    } 
-                });
-                
-                // Pastikan user menceklis pilihan untuk membagikan audio sistem
-                if (currentStream.getAudioTracks().length === 0) {
-                    currentStream.getTracks().forEach(track => track.stop());
-                    throw new Error("Anda tidak membagikan System Audio. Pastikan menceklis 'Share audio' saat memilih Layar/Tab.");
-                }
-
-                liveStreamSource = audioCtx.createMediaStreamSource(currentStream);
-                liveStreamSource.connect(masterGainNode);
-
-                // Auto-fallback ke mode file lokal jika pengguna menghentikan share screen
-                currentStream.getVideoTracks()[0].addEventListener('ended', () => {
-                    const sel = document.getElementById('audio-source-selector');
-                    if (sel && sel.value === 'live') {
-                        sel.value = 'file';
-                        routeAudioSource('file');
-                    }
-                });
-
-            } catch (err) {
-                alert("Gagal mengakses Internal System Audio: " + err.message);
-                document.getElementById('audio-source-selector').value = 'file';
-                routeAudioSource('file');
-            }
-        }
-    }
-
     // Inisialisasi Audio Engine dikunci di balik klik pertama
     function initSystemAudio() {
         if (audioCtx) return; 
@@ -1204,14 +1193,7 @@
         nodeL.limiter.connect(merger, 0, 0); nodeR.limiter.connect(merger, 0, 1);
         merger.connect(audioCtx.destination);
 
-        mediaElementSource = audioCtx.createMediaElementSource(audioPlayer); 
-        
-        // Memilih input sumber secara otomatis
-        if (document.getElementById('audio-source-selector').value === 'file') {
-            mediaElementSource.connect(masterGainNode);
-        } else {
-            routeAudioSource('live');
-        }
+        audioSource = audioCtx.createMediaElementSource(audioPlayer); audioSource.connect(masterGainNode);
 
         applyCurrentMode(); syncAllHardwareSlidersToDSP();
         drawRealtimePEQCurve();
@@ -1336,17 +1318,19 @@
             }
         };
 
-        if(nodeL) renderVU(nodeL.analyser, nodeL.limiter, 'vu-l', 'db-txt-l', 'vu-gr-l', 'gr-txt-l');
+                if(nodeL) renderVU(nodeL.analyser, nodeL.limiter, 'vu-l', 'db-txt-l', 'vu-gr-l', 'gr-txt-l');
         if(nodeR) renderVU(nodeR.analyser, nodeR.limiter, 'vu-r', 'db-txt-r', 'vu-gr-r', 'gr-txt-r');
 
-        globalRenderReqId = requestAnimationFrame(processRealtimeVUMeters);
+        // --- TAMBAHAN: Render ulang PEQ terus-menerus untuk animasi lagu ---
+        if (nodeL && nodeL.spectrumAnalyser) {
+            drawRealtimePEQCurve();
+        }
+        // -------------------------------------------------------------------
+
+        globalRenderReqId = requestAnimationFrame(processRealtimeVUMeters);        
     }
 
     function connectUIElements() {
-        document.getElementById('audio-source-selector').addEventListener('change', (e) => {
-            if(audioCtx) { routeAudioSource(e.target.value); }
-        });
-
         document.getElementById('master-gain').addEventListener('input', (e) => {
             document.getElementById('master-gain-disp').innerText = parseFloat(e.target.value).toFixed(1) + " dB";
             if (masterGainNode) masterGainNode.gain.setTargetAtTime(calculateGain(parseFloat(e.target.value)), audioCtx.currentTime, 0.02);
@@ -1681,4 +1665,3 @@
 </script>
 </body>
 </html>
-
